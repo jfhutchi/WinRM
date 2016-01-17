@@ -25,8 +25,8 @@ module WinRM
   # This is the main class that does the SOAP request/response logic. There are a few helper
   # classes, but pretty much everything comes through here first.
   class WinRMWebService
-    DEFAULT_TIMEOUT = 'PT180.000S'
-    DEFAULT_MAX_ENV_SIZE = 512000
+    DEFAULT_TIMEOUT = 'PT60S'
+    DEFAULT_MAX_ENV_SIZE = 153600
     DEFAULT_LOCALE = 'en-US'
 
     attr_reader :endpoint, :timeout, :retry_limit, :retry_delay, :output_decoder
@@ -146,17 +146,18 @@ module WinRM
         }
       end
       builder = Builder::XmlMarkup.new
+      builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
         env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_create,h_opts)) }
         env.tag! :env, :Body do |body|
-          body.tag!("#{NS_WIN_SHELL}:Shell", {"Name" => "WinRB", "ShellId" => shell_id}) { |s| s << Gyoku.xml(shell_body)}
+          body.tag!("#{NS_WIN_SHELL}:Shell", { "ShellId" => shell_id}) { |s| s << Gyoku.xml(shell_body) }
         end
       end
 
       resp_doc = send_message(builder.target!)
       shell_id = REXML::XPath.first(resp_doc, "//*[@Name='ShellId']").text
       logger.debug("[WinRM] remote shell #{shell_id} is open on #{@endpoint}")
-      # puts "**shell response for #{resp_doc}"
+
       keep_alive(shell_id)
 
       if block_given?
@@ -168,6 +169,22 @@ module WinRM
       else
         shell_id
       end
+    end
+
+    def keep_alive(shell_id)
+      h_opts = { "#{NS_WSMAN_DMTF}:OptionSet" => { "#{NS_WSMAN_DMTF}:Option" => "TRUE",
+        :attributes! => {"#{NS_WSMAN_DMTF}:Option" => {'Name' => 'WSMAN_CMDSHELL_OPTION_KEEPALIVE'}}}}
+      body = { "#{NS_WIN_SHELL}:DesiredStream" => 'stdout' }
+      builder = Builder::XmlMarkup.new
+      builder.instruct!(:xml, :encoding => 'UTF-8')
+      builder.tag! :env, :Envelope, namespaces do |env|
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_receive,h_opts,selector_shell_id(shell_id))) }
+        env.tag! :env, :Body do |env_body|
+          env_body.tag!("#{NS_WIN_SHELL}:Receive") { |cl| cl << Gyoku.xml(body) }
+        end
+      end
+
+      resp_doc = send_message(builder.target!)
     end
 
     # Run a command on a machine with an open shell
@@ -192,6 +209,7 @@ module WinRM
       body = { "#{NS_WIN_SHELL}:Command" => "Invoke-Expression", "#{NS_WIN_SHELL}:Arguments" => b64_arguments }
 
       builder = Builder::XmlMarkup.new
+      builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
         env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_command,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
@@ -204,10 +222,6 @@ module WinRM
 
       resp_doc = send_message(xml)
       command_id = REXML::XPath.first(resp_doc, "//#{NS_WIN_SHELL}:CommandId").text
-
-      # puts "**comand response for #{resp_doc}"
-
-      # cleanup_command(shell_id, command_id)
 
       if block_given?
         begin
@@ -254,6 +268,7 @@ module WinRM
         :attributes! => {"#{NS_WIN_SHELL}:DesiredStream" => {'CommandId' => command_id}}}
 
       builder = Builder::XmlMarkup.new
+      builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
         env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_receive,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
@@ -267,10 +282,8 @@ module WinRM
       output = Output.new
 
       while done_elems.empty?
-        # puts "**sending receive request"
         resp_doc = send_get_output_message(request_msg)
-        # puts "***receive response"
-        # puts resp_doc
+
         REXML::XPath.match(resp_doc, "//#{NS_WIN_SHELL}:Stream").each do |n|
           next if n.text.nil? || n.text.empty?
 
@@ -470,7 +483,8 @@ module WinRM
         :attributes! => {
           "#{NS_WSMAN_DMTF}:MaxEnvelopeSize" => {'mustUnderstand' => true},
           "#{NS_WSMAN_DMTF}:Locale/" => {'xml:lang' => @locale, 'mustUnderstand' => false},
-          "#{NS_WSMAN_MSFT}:DataLocale/" => {'xml:lang' => @locale, 'mustUnderstand' => false}
+          "#{NS_WSMAN_MSFT}:DataLocale/" => {'xml:lang' => @locale, 'mustUnderstand' => false},
+          "#{NS_WSMAN_MSFT}:SessionId" => {'mustUnderstand' => false}
         }}
     end
 
@@ -487,7 +501,6 @@ module WinRM
     end
 
     def send_get_output_message(message)
-      # puts "sending get output"
       send_message(message)
       puts "get output sent"
     rescue WinRMWSManFault => e
