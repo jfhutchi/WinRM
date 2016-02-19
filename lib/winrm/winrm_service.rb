@@ -20,7 +20,9 @@ require 'securerandom'
 require_relative 'command_executor'
 require_relative 'command_output_decoder'
 require_relative 'helpers/powershell_script'
-require_relative 'WSMV/create_shell'
+require_relative 'wsmv/soap'
+require_relative 'wsmv/header'
+require_relative 'wsmv/create_shell'
 
 module WinRM
   # This is the main class that does the SOAP request/response logic. There are a few helper
@@ -30,7 +32,10 @@ module WinRM
     DEFAULT_MAX_ENV_SIZE = 153600
     DEFAULT_LOCALE = 'en-US'
 
-    attr_reader :endpoint, :timeout, :retry_limit, :retry_delay, :output_decoder
+    include WinRM::WSMV::SOAP
+    include WinRM::WSMV::Header
+
+    attr_reader :endpoint, :retry_limit, :retry_delay
 
     attr_accessor :logger
 
@@ -155,7 +160,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_receive,h_opts,selector_shell_id(shell_id))) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_receive,h_opts,selector_shell_id(shell_id))) }
         env.tag! :env, :Body do |env_body|
           env_body.tag!("#{NS_WIN_SHELL}:Receive") { |cl| cl << Gyoku.xml(body) }
         end
@@ -188,7 +193,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_command,selector_shell_id(shell_id))) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_command,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
           env_body.tag!("#{NS_WIN_SHELL}:CommandLine", {"CommandId" => command_id}) { |cl| cl << Gyoku.xml(body) }
         end
@@ -225,7 +230,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_send,selector_shell_id(shell_id))) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_send,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
           env_body << Gyoku.xml(body)
         end
@@ -247,7 +252,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_receive,selector_shell_id(shell_id))) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_receive,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
           env_body.tag!("#{NS_WIN_SHELL}:Receive") { |cl| cl << Gyoku.xml(body) }
         end
@@ -297,7 +302,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_signal,selector_shell_id(shell_id))) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_signal,selector_shell_id(shell_id))) }
         env.tag!(:env, :Body) do |env_body|
           env_body.tag!("#{NS_WIN_SHELL}:Signal", {'CommandId' => command_id}) { |cl| cl << Gyoku.xml(body) }
         end
@@ -315,7 +320,7 @@ module WinRM
       builder.instruct!(:xml, :encoding => 'UTF-8')
 
       builder.tag!('env:Envelope', namespaces) do |env|
-        env.tag!('env:Header') { |h| h << Gyoku.xml(merge_headers(header,resource_uri_cmd,action_delete,selector_shell_id(shell_id))) }
+        env.tag!('env:Header') { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_cmd,action_delete,selector_shell_id(shell_id))) }
         env.tag!('env:Body')
       end
 
@@ -388,7 +393,7 @@ module WinRM
       builder = Builder::XmlMarkup.new
       builder.instruct!(:xml, :encoding => 'UTF-8')
       builder.tag! :env, :Envelope, namespaces do |env|
-        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(header,resource_uri_wmi,action_enumerate)) }
+        env.tag!(:env, :Header) { |h| h << Gyoku.xml(merge_headers(shared_headers(session_opts), resource_uri_wmi,action_enumerate)) }
         env.tag!(:env, :Body) do |env_body|
           env_body.tag!("#{NS_ENUM}:Enumerate") { |en| en << Gyoku.xml(body) }
         end
@@ -439,53 +444,6 @@ module WinRM
     def configure_retries(opts)
       @retry_delay = opts[:retry_delay] || 10
       @retry_limit = opts[:retry_limit] || 3
-    end
-
-    def namespaces
-      {
-        'xmlns:xsd' => 'http://www.w3.org/2001/XMLSchema',
-        'xmlns:xsi' => 'http://www.w3.org/2001/XMLSchema-instance',
-        'xmlns:env' => 'http://www.w3.org/2003/05/soap-envelope',
-        'xmlns:a' => 'http://schemas.xmlsoap.org/ws/2004/08/addressing',
-        'xmlns:b' => 'http://schemas.dmtf.org/wbem/wsman/1/cimbinding.xsd',
-        'xmlns:n' => 'http://schemas.xmlsoap.org/ws/2004/09/enumeration',
-        'xmlns:x' => 'http://schemas.xmlsoap.org/ws/2004/09/transfer',
-        'xmlns:w' => 'http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd',
-        'xmlns:p' => 'http://schemas.microsoft.com/wbem/wsman/1/wsman.xsd',
-        'xmlns:rsp' => 'http://schemas.microsoft.com/wbem/wsman/1/windows/shell',
-        'xmlns:cfg' => 'http://schemas.microsoft.com/wbem/wsman/1/config',
-      }
-    end
-
-    def header
-      { "#{NS_ADDRESSING}:To" => "#{@xfer.endpoint.to_s}",
-        "#{NS_ADDRESSING}:ReplyTo" => {
-        "#{NS_ADDRESSING}:Address" => 'http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous',
-          :attributes! => {"#{NS_ADDRESSING}:Address" => {'mustUnderstand' => true}}},
-        "#{NS_WSMAN_DMTF}:MaxEnvelopeSize" => @max_env_sz,
-        "#{NS_ADDRESSING}:MessageID" => "uuid:#{SecureRandom.uuid.to_s.upcase}",
-        "#{NS_WSMAN_MSFT}:SessionId" => "uuid:#{@session_id}",
-        "#{NS_WSMAN_DMTF}:Locale/" => '',
-        "#{NS_WSMAN_MSFT}:DataLocale/" => '',
-        "#{NS_WSMAN_DMTF}:OperationTimeout" => Iso8601Duration.sec_to_dur(@operation_timeout),
-        :attributes! => {
-          "#{NS_WSMAN_DMTF}:MaxEnvelopeSize" => {'mustUnderstand' => true},
-          "#{NS_WSMAN_DMTF}:Locale/" => {'xml:lang' => @locale, 'mustUnderstand' => false},
-          "#{NS_WSMAN_MSFT}:DataLocale/" => {'xml:lang' => @locale, 'mustUnderstand' => false},
-          "#{NS_WSMAN_MSFT}:SessionId" => {'mustUnderstand' => false}
-        }}
-    end
-
-    # merge the various header hashes and make sure we carry all of the attributes
-    #   through instead of overwriting them.
-    def merge_headers(*headers)
-      hdr = {}
-      headers.each do |h|
-        hdr.merge!(h) do |k,v1,v2|
-          v1.merge!(v2) if k == :attributes!
-        end
-      end
-      hdr
     end
 
     def send_get_output_message(message)
